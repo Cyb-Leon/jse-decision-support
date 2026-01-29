@@ -1,0 +1,22 @@
+# JSE Decision-Support System Dependencies
+# For Streamlit in Snowflake, most of these are pre-installed
+
+# Core
+streamlit>=1.32.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Visualization
+plotly>=5.18.0
+altair>=5.0.0
+
+# Snowflake (for local development)
+snowflake-snowpark-python>=1.11.0
+snowflake-ml-python>=1.2.0
+
+# Document processing
+PyPDF2>=3.0.0
+openpyxl>=3.1.0
+
+# Utilities
+python-dateutil>=2.8.0

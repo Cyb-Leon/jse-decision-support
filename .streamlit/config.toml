@@ -1,0 +1,15 @@
+# Streamlit Configuration for JSE Decision-Support System
+
+[theme]
+primaryColor = "#1E88E5"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F7FA"
+textColor = "#1A1A1A"
+font = "sans serif"
+
+[server]
+maxUploadSize = 100
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
