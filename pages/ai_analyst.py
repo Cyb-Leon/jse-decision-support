@@ -1,6 +1,6 @@
 """
 AI Analyst Page - RAG-powered chat for querying documents and data.
-JSE Decision-Support System
+JSE Decision-Support System - ETL/RAG Platform
 """
 import streamlit as st
 import pandas as pd
@@ -15,7 +15,6 @@ from utils.cortex_utils import (
     build_rag_prompt,
     CORTEX_MODELS,
 )
-from utils.data_utils import SAMPLE_JSE_TICKERS
 
 
 def get_relevant_context(question: str, ticker: str = None) -> str:
@@ -30,19 +29,23 @@ def get_relevant_context(question: str, ticker: str = None) -> str:
         Relevant context string
     """
     context_parts = []
+    companies = st.session_state.get("companies", [])
     
     # Search uploaded documents
     for doc in st.session_state.uploaded_documents:
         # Check if document is relevant
         doc_name = doc.get("name", "").lower()
         doc_content = doc.get("content", "")[:1000].lower()
+        doc_ticker = doc.get("ticker", "")
         
         is_relevant = False
+        if ticker and ticker.lower() == doc_ticker.lower():
+            is_relevant = True
         if ticker and ticker.lower() in doc_name:
             is_relevant = True
         if ticker and ticker.lower() in doc_content:
             is_relevant = True
-        if any(word in doc_name for word in question.lower().split()):
+        if any(word in doc_name for word in question.lower().split() if len(word) > 3):
             is_relevant = True
         
         if is_relevant:
@@ -55,14 +58,21 @@ def get_relevant_context(question: str, ticker: str = None) -> str:
             elif "summary" in doc:
                 context_parts.append(f"[Source: {doc['name']} - Summary]\n{doc['summary']}")
     
-    # Add portfolio context if relevant
-    if st.session_state.portfolio and any(word in question.lower() for word in ["portfolio", "holdings", "position"]):
-        portfolio_df = pd.DataFrame(st.session_state.portfolio)
-        context_parts.append(f"[Source: User Portfolio]\n{portfolio_df.to_string()}")
+    # Add company context if relevant
+    if companies and any(word in question.lower() for word in ["company", "companies", "sector", "all"]):
+        company_list = "\n".join([f"- {c['ticker']}: {c['name']} ({c['sector']})" for c in companies])
+        context_parts.append(f"[Source: User Companies]\n{company_list}")
     
     # Add watchlist context
     if st.session_state.watchlist and "watchlist" in question.lower():
         context_parts.append(f"[Source: Watchlist]\nTickers being watched: {', '.join(st.session_state.watchlist)}")
+    
+    # Add SENS announcements context
+    sens_alerts = st.session_state.get("sens_alerts", [])
+    if sens_alerts and any(word in question.lower() for word in ["sens", "announcement", "news", "update"]):
+        recent_sens = sens_alerts[:5]
+        sens_text = "\n".join([f"- {a['ticker']}: {a.get('headline', 'N/A')} ({a.get('category', 'N/A')})" for a in recent_sens])
+        context_parts.append(f"[Source: SENS Announcements]\n{sens_text}")
     
     return "\n\n---\n\n".join(context_parts) if context_parts else ""
 
@@ -81,7 +91,7 @@ def render_chat_interface():
                         st.caption(f"• {source}")
     
     # Chat input
-    if prompt := st.chat_input("Ask about JSE equities, your portfolio, or uploaded documents..."):
+    if prompt := st.chat_input("Ask about your companies, uploaded documents, or SENS announcements..."):
         # Add user message
         st.session_state.messages.append({
             "role": "user",
@@ -102,7 +112,7 @@ def render_chat_interface():
         if context:
             # RAG-enhanced prompt
             full_prompt = f"""You are a senior financial analyst specializing in JSE-listed equities.
-You have access to the user's documents, portfolio, and market data.
+You have access to the user's documents, company data, and SENS announcements.
 Answer questions based on the provided context. Always cite your sources.
 Do not make price predictions - focus on analysis and insights.
 
@@ -124,7 +134,7 @@ Do not make price predictions - focus on frameworks and considerations.
 USER QUESTION:
 {prompt}
 
-Note: For more specific analysis, suggest the user upload relevant documents or specify a ticker."""
+Note: For more specific analysis, suggest the user upload relevant documents or specify a company."""
         
         # Generate response
         with st.chat_message("assistant"):
@@ -155,21 +165,31 @@ def render_quick_prompts():
     """Render quick prompt suggestions."""
     st.subheader(":material/lightbulb: Suggested Questions")
     
+    companies = st.session_state.get("companies", [])
     selected_ticker = st.session_state.get("analyst_ticker_filter")
     
     if selected_ticker:
+        company = next((c for c in companies if c["ticker"] == selected_ticker), None)
+        company_name = company["name"] if company else selected_ticker
         prompts = [
-            f"What are the key risks for {selected_ticker}?",
-            f"Summarize the latest news about {selected_ticker}",
-            f"How does {selected_ticker} compare to its sector peers?",
-            f"What are the main growth drivers for {selected_ticker}?",
+            f"What key information do we have about {company_name}?",
+            f"Summarize all documents for {selected_ticker}",
+            f"What risks are mentioned in {selected_ticker}'s documents?",
+            f"What are the recent SENS announcements for {selected_ticker}?",
+        ]
+    elif companies:
+        prompts = [
+            "Which sectors have the most companies in my database?",
+            "Summarize the key themes across all my documents",
+            "What companies have the most documents ingested?",
+            "What recent SENS announcements should I know about?",
         ]
     else:
         prompts = [
-            "Summarize my portfolio's sector exposure",
-            "What are the key themes in my uploaded documents?",
-            "Which of my holdings has the highest risk?",
-            "Explain the current state of the JSE market",
+            "How do I get started with this platform?",
+            "What types of documents should I upload?",
+            "Explain key financial metrics for JSE equities",
+            "What should I look for in annual reports?",
         ]
     
     cols = st.columns(2)
@@ -189,11 +209,14 @@ def render_context_panel():
     """Render the context configuration panel."""
     st.subheader(":material/tune: Analysis Context")
     
+    companies = st.session_state.get("companies", [])
+    
     # Ticker filter
-    ticker_options = ["All"] + [t["ticker"] for t in SAMPLE_JSE_TICKERS]
+    ticker_options = ["All"] + [c["ticker"] for c in companies]
     selected = st.selectbox(
-        "Focus on ticker",
+        "Focus on company",
         options=ticker_options,
+        format_func=lambda t: f"{t} - {next((c['name'] for c in companies if c['ticker'] == t), t)}" if t != "All" else "All Companies",
         key="analyst_ticker_filter_select"
     )
     st.session_state.analyst_ticker_filter = None if selected == "All" else selected
@@ -201,7 +224,7 @@ def render_context_panel():
     # Analysis mode
     analysis_mode = st.selectbox(
         "Analysis mode",
-        options=["General", "Fundamental", "Technical", "Sentiment", "News"],
+        options=["General", "Fundamental", "Risk Assessment", "Sentiment", "News"],
         key="analysis_mode_select"
     )
     st.session_state.analysis_mode = analysis_mode.lower()
@@ -220,18 +243,17 @@ def render_context_panel():
     # Available sources
     st.subheader(":material/folder: Available Sources")
     
+    company_count = len(companies)
+    st.caption(f":material/business: {company_count} companies")
+    
     doc_count = len(st.session_state.uploaded_documents)
     st.caption(f":material/description: {doc_count} documents")
     
-    if st.session_state.portfolio:
-        st.caption(f":material/account_balance_wallet: Portfolio ({len(st.session_state.portfolio)} holdings)")
+    sens_count = len(st.session_state.get("sens_alerts", []))
+    st.caption(f":material/notifications: {sens_count} SENS announcements")
     
     if st.session_state.watchlist:
-        st.caption(f":material/visibility: Watchlist ({len(st.session_state.watchlist)} tickers)")
-    
-    api_count = len(st.session_state.api_connections)
-    if api_count:
-        st.caption(f":material/api: {api_count} API connections")
+        st.caption(f":material/visibility: {len(st.session_state.watchlist)} in watchlist")
 
 
 def render_chat_history_panel():
@@ -270,7 +292,11 @@ def render_chat_history_panel():
 
 # Main page rendering
 st.title(":material/psychology: AI Analyst")
-st.caption("RAG-powered analysis of your JSE equity data")
+st.caption("RAG-powered analysis of your company data and documents")
+
+# Initialize state
+if "companies" not in st.session_state:
+    st.session_state.companies = []
 
 # Check for incoming context (e.g., from Company Research page)
 if st.session_state.chat_context:
@@ -298,12 +324,24 @@ with col_side:
 
 # Floating input hint
 if not st.session_state.messages:
-    st.info("""
-    :material/info: **Getting Started**
+    companies = st.session_state.get("companies", [])
+    docs = st.session_state.get("uploaded_documents", [])
     
-    1. Upload documents in **Data Ingestion** for RAG-powered analysis
-    2. Select a ticker to focus your analysis
-    3. Ask questions about your portfolio, documents, or JSE equities
-    
-    The AI Analyst will cite sources from your uploaded documents.
-    """)
+    if not companies:
+        st.info("""
+        :material/info: **Getting Started**
+        
+        1. Add companies in the **Dashboard**
+        2. Upload documents in **Data Ingestion**
+        3. Ask questions about your company data
+        
+        The AI Analyst will use RAG to cite sources from your documents.
+        """)
+    elif not docs:
+        st.info("""
+        :material/info: **Next Step**
+        
+        You have {0} companies added. Now upload documents (annual reports, 
+        SENS announcements, research) in **Data Ingestion** to enable 
+        RAG-powered analysis.
+        """.format(len(companies)))

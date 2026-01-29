@@ -1,6 +1,6 @@
 """
 SENS Monitor Page - Track JSE announcements and corporate actions.
-JSE Decision-Support System
+JSE Decision-Support System - ETL/RAG Platform
 """
 import streamlit as st
 import pandas as pd
@@ -8,10 +8,6 @@ from datetime import datetime, timedelta
 
 import sys
 sys.path.append("..")
-from utils.data_utils import (
-    create_sample_sens_announcements,
-    SAMPLE_JSE_TICKERS,
-)
 from utils.cortex_utils import call_cortex_complete, stream_cortex_response
 
 
@@ -34,11 +30,11 @@ def render_announcement_card(announcement: dict):
             st.markdown(f"**{announcement['ticker']}**")
         
         with col2:
-            st.caption(announcement["company"])
+            st.caption(announcement.get("company", announcement["ticker"]))
         
         with col3:
             # Format timestamp
-            if isinstance(announcement["date"], datetime):
+            if isinstance(announcement.get("date"), datetime):
                 time_ago = datetime.now() - announcement["date"]
                 if time_ago.days > 0:
                     time_str = f"{time_ago.days}d ago"
@@ -47,17 +43,18 @@ def render_announcement_card(announcement: dict):
                 else:
                     time_str = f"{time_ago.seconds // 60}m ago"
             else:
-                time_str = "Unknown"
+                time_str = announcement.get("date", "Unknown")
             st.caption(time_str)
         
         # Category badge
-        st.markdown(f":{color}[{announcement['category']}]")
+        st.markdown(f":{color}[{announcement.get('category', 'Announcement')}]")
         
         # Headline
-        st.markdown(f"**{announcement['headline']}**")
+        st.markdown(f"**{announcement.get('headline', 'No headline')}**")
         
         # Summary
-        st.caption(announcement["summary"])
+        if announcement.get("summary"):
+            st.caption(announcement["summary"])
         
         # Actions
         col1, col2, col3 = st.columns(3)
@@ -65,7 +62,7 @@ def render_announcement_card(announcement: dict):
         with col1:
             if st.button(
                 ":material/psychology: Analyze",
-                key=f"analyze_{announcement['ticker']}_{hash(announcement['headline'])}",
+                key=f"analyze_{announcement['ticker']}_{hash(str(announcement))}",
                 use_container_width=True
             ):
                 st.session_state.sens_analysis_target = announcement
@@ -73,7 +70,7 @@ def render_announcement_card(announcement: dict):
         with col2:
             if st.button(
                 ":material/visibility: Research",
-                key=f"research_{announcement['ticker']}_{hash(announcement['headline'])}",
+                key=f"research_{announcement['ticker']}_{hash(str(announcement))}",
                 use_container_width=True
             ):
                 st.session_state.selected_ticker = announcement["ticker"]
@@ -83,7 +80,7 @@ def render_announcement_card(announcement: dict):
             if announcement["ticker"] not in st.session_state.tracked_tickers:
                 if st.button(
                     ":material/notifications: Track",
-                    key=f"track_{announcement['ticker']}_{hash(announcement['headline'])}",
+                    key=f"track_{announcement['ticker']}_{hash(str(announcement))}",
                     use_container_width=True
                 ):
                     st.session_state.tracked_tickers.append(announcement["ticker"])
@@ -95,15 +92,15 @@ def render_announcement_analysis(announcement: dict):
     st.subheader(":material/psychology: AI Analysis")
     
     with st.container(border=True):
-        st.markdown(f"**Analyzing:** {announcement['headline']}")
-        st.caption(f"Company: {announcement['company']} ({announcement['ticker']})")
+        st.markdown(f"**Analyzing:** {announcement.get('headline', 'Announcement')}")
+        st.caption(f"Company: {announcement.get('company', announcement['ticker'])} ({announcement['ticker']})")
         
         prompt = f"""Analyze this JSE SENS announcement and provide insights for investors:
 
-COMPANY: {announcement['company']} ({announcement['ticker']})
-CATEGORY: {announcement['category']}
-HEADLINE: {announcement['headline']}
-SUMMARY: {announcement['summary']}
+COMPANY: {announcement.get('company', announcement['ticker'])} ({announcement['ticker']})
+CATEGORY: {announcement.get('category', 'General')}
+HEADLINE: {announcement.get('headline', 'N/A')}
+SUMMARY: {announcement.get('summary', 'N/A')}
 
 Provide:
 1. Key takeaways from this announcement
@@ -124,13 +121,96 @@ Do not make price predictions. Focus on analytical insights."""
             st.rerun()
 
 
+def render_add_announcement_form():
+    """Render form to manually add a SENS announcement."""
+    st.subheader(":material/add_circle: Add SENS Announcement")
+    
+    companies = st.session_state.get("companies", [])
+    
+    if not companies:
+        st.info("Add companies first to track their SENS announcements.")
+        if st.button(":material/add_business: Add Companies"):
+            st.switch_page("pages/dashboard.py")
+        return
+    
+    with st.form("add_sens_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            ticker_options = {f"{c['ticker']} - {c['name']}": c for c in companies}
+            selected_display = st.selectbox(
+                "Company *",
+                options=list(ticker_options.keys()),
+            )
+            selected_company = ticker_options[selected_display]
+            
+            category = st.selectbox(
+                "Category *",
+                options=[
+                    "Trading Statement",
+                    "Dividend Declaration",
+                    "Operational Update",
+                    "Acquisition",
+                    "Production Report",
+                    "Director Dealings",
+                    "Corporate Action",
+                    "Results Announcement",
+                    "Cautionary Announcement",
+                    "Other",
+                ],
+            )
+        
+        with col2:
+            headline = st.text_input(
+                "Headline *",
+                placeholder="e.g., Trading Statement for H1 2026",
+            )
+            
+            sentiment = st.selectbox(
+                "Sentiment",
+                options=["neutral", "positive", "negative"],
+            )
+        
+        summary = st.text_area(
+            "Summary",
+            placeholder="Brief summary of the announcement...",
+            height=100,
+        )
+        
+        submitted = st.form_submit_button(
+            ":material/add: Add Announcement",
+            type="primary",
+            use_container_width=True,
+        )
+        
+        if submitted:
+            if not headline.strip():
+                st.error("Headline is required")
+            else:
+                new_announcement = {
+                    "ticker": selected_company["ticker"],
+                    "company": selected_company["name"],
+                    "category": category,
+                    "headline": headline.strip(),
+                    "summary": summary.strip(),
+                    "sentiment": sentiment,
+                    "date": datetime.now(),
+                    "added_at": datetime.now().isoformat(),
+                }
+                st.session_state.sens_alerts.append(new_announcement)
+                st.success(f"Added SENS announcement for {selected_company['ticker']}")
+                st.rerun()
+
+
 def render_filter_controls():
     """Render filter and search controls."""
+    companies = st.session_state.get("companies", [])
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
         # Ticker filter
-        ticker_options = ["All"] + [t["ticker"] for t in SAMPLE_JSE_TICKERS]
+        ticker_options = ["All"] + [c["ticker"] for c in companies]
         st.session_state.sens_ticker_filter = st.selectbox(
             "Filter by ticker",
             options=ticker_options,
@@ -141,7 +221,8 @@ def render_filter_controls():
         # Category filter
         categories = ["All", "Trading Statement", "Dividend Declaration", 
                      "Operational Update", "Acquisition", "Production Report",
-                     "Director Dealings", "Corporate Action"]
+                     "Director Dealings", "Corporate Action", "Results Announcement",
+                     "Cautionary Announcement", "Other"]
         st.session_state.sens_category_filter = st.selectbox(
             "Filter by category",
             options=categories,
@@ -170,17 +251,23 @@ def filter_announcements(announcements: list) -> list:
     # Category filter
     category_filter = st.session_state.get("sens_category_filter", "All")
     if category_filter != "All":
-        filtered = [a for a in filtered if a["category"] == category_filter]
+        filtered = [a for a in filtered if a.get("category") == category_filter]
     
     # Time filter
     time_filter = st.session_state.get("sens_time_filter", "All Time")
     now = datetime.now()
-    if time_filter == "Today":
-        filtered = [a for a in filtered if (now - a["date"]).days == 0]
-    elif time_filter == "This Week":
-        filtered = [a for a in filtered if (now - a["date"]).days <= 7]
-    elif time_filter == "This Month":
-        filtered = [a for a in filtered if (now - a["date"]).days <= 30]
+    if time_filter != "All Time":
+        filtered_by_time = []
+        for a in filtered:
+            if isinstance(a.get("date"), datetime):
+                days_diff = (now - a["date"]).days
+                if time_filter == "Today" and days_diff == 0:
+                    filtered_by_time.append(a)
+                elif time_filter == "This Week" and days_diff <= 7:
+                    filtered_by_time.append(a)
+                elif time_filter == "This Month" and days_diff <= 30:
+                    filtered_by_time.append(a)
+        filtered = filtered_by_time
     
     return filtered
 
@@ -189,13 +276,15 @@ def render_tracked_tickers():
     """Render tracked tickers management."""
     st.subheader(":material/notifications_active: Tracked Tickers")
     
+    companies = st.session_state.get("companies", [])
+    
     if st.session_state.tracked_tickers:
         for ticker in st.session_state.tracked_tickers:
             col1, col2 = st.columns([3, 1])
             with col1:
-                ticker_info = next((t for t in SAMPLE_JSE_TICKERS if t["ticker"] == ticker), None)
-                if ticker_info:
-                    st.caption(f"**{ticker}** - {ticker_info['name']}")
+                company = next((c for c in companies if c["ticker"] == ticker), None)
+                if company:
+                    st.caption(f"**{ticker}** - {company['name']}")
                 else:
                     st.caption(f"**{ticker}**")
             with col2:
@@ -208,18 +297,21 @@ def render_tracked_tickers():
     st.divider()
     
     # Add ticker manually
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        new_ticker = st.selectbox(
-            "Add ticker",
-            options=[t["ticker"] for t in SAMPLE_JSE_TICKERS if t["ticker"] not in st.session_state.tracked_tickers],
-            key="add_tracked_ticker_select"
-        )
-    with col2:
-        if st.button(":material/add:", use_container_width=True):
-            if new_ticker and new_ticker not in st.session_state.tracked_tickers:
-                st.session_state.tracked_tickers.append(new_ticker)
-                st.rerun()
+    if companies:
+        available = [c["ticker"] for c in companies if c["ticker"] not in st.session_state.tracked_tickers]
+        if available:
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                new_ticker = st.selectbox(
+                    "Add ticker",
+                    options=available,
+                    key="add_tracked_ticker_select"
+                )
+            with col2:
+                if st.button(":material/add:", use_container_width=True):
+                    if new_ticker and new_ticker not in st.session_state.tracked_tickers:
+                        st.session_state.tracked_tickers.append(new_ticker)
+                        st.rerun()
 
 
 def render_announcement_stats(announcements: list):
@@ -249,15 +341,19 @@ def render_daily_digest():
     """Render AI-generated daily digest."""
     st.subheader(":material/summarize: Daily Digest")
     
+    announcements = st.session_state.get("sens_alerts", [])
+    
+    if not announcements:
+        st.info("No announcements to summarize. Add SENS announcements to generate a digest.")
+        return
+    
     if st.button(":material/auto_awesome: Generate Daily Summary", use_container_width=True):
-        announcements = create_sample_sens_announcements()
-        
         # Build summary prompt
         announcement_texts = []
         for a in announcements[:10]:  # Limit to 10 for prompt size
-            announcement_texts.append(f"- {a['ticker']}: {a['headline']} ({a['category']})")
+            announcement_texts.append(f"- {a['ticker']}: {a.get('headline', 'N/A')} ({a.get('category', 'N/A')})")
         
-        prompt = f"""Summarize today's key JSE SENS announcements for an investor:
+        prompt = f"""Summarize these JSE SENS announcements for an investor:
 
 ANNOUNCEMENTS:
 {chr(10).join(announcement_texts)}
@@ -283,38 +379,43 @@ st.caption("Track JSE announcements and corporate actions")
 
 # Initialize SENS-specific session state
 st.session_state.setdefault("sens_analysis_target", None)
+st.session_state.setdefault("sens_alerts", [])
 
-# Get announcements (sample data for demo)
-announcements = create_sample_sens_announcements()
+# Get announcements from session state
+announcements = st.session_state.get("sens_alerts", [])
 
 # Check if we should show analysis
 if st.session_state.sens_analysis_target:
     render_announcement_analysis(st.session_state.sens_analysis_target)
     st.divider()
 
-# Filter controls
-render_filter_controls()
-
-# Stats
-st.divider()
-filtered_announcements = filter_announcements(announcements)
-render_announcement_stats(filtered_announcements)
-
 # Main content tabs
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
+    ":material/add_circle: Add",
     ":material/list: All Announcements",
     ":material/notifications_active: Tracked",
     ":material/summarize: Daily Digest"
 ])
 
 with tab1:
-    if filtered_announcements:
-        for announcement in filtered_announcements:
-            render_announcement_card(announcement)
-    else:
-        st.info("No announcements match your filters.")
+    render_add_announcement_form()
 
 with tab2:
+    render_filter_controls()
+    st.divider()
+    
+    filtered_announcements = filter_announcements(announcements)
+    render_announcement_stats(filtered_announcements)
+    
+    st.divider()
+    
+    if filtered_announcements:
+        for announcement in sorted(filtered_announcements, key=lambda x: x.get("date", datetime.min), reverse=True):
+            render_announcement_card(announcement)
+    else:
+        st.info("No announcements yet. Add SENS announcements to track them.")
+
+with tab3:
     # Show announcements only for tracked tickers
     if st.session_state.tracked_tickers:
         tracked_announcements = [
@@ -322,14 +423,14 @@ with tab2:
             if a["ticker"] in st.session_state.tracked_tickers
         ]
         if tracked_announcements:
-            for announcement in tracked_announcements:
+            for announcement in sorted(tracked_announcements, key=lambda x: x.get("date", datetime.min), reverse=True):
                 render_announcement_card(announcement)
         else:
             st.info("No recent announcements for your tracked tickers.")
     else:
         st.info("You're not tracking any tickers. Add tickers to get personalized alerts.")
 
-with tab3:
+with tab4:
     render_daily_digest()
 
 # Sidebar with tracking management

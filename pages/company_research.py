@@ -1,410 +1,394 @@
 """
-Company Research Page - Deep-dive analysis per equity.
-JSE Decision-Support System
+Company Research Page - Deep-dive analysis and document exploration.
+JSE Decision-Support System - ETL/RAG Platform
 """
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import random
+from datetime import datetime
 
 import sys
 sys.path.append("..")
 from utils.data_utils import (
     format_currency,
     format_percentage,
-    format_number,
-    SAMPLE_JSE_TICKERS,
+    JSE_SECTORS,
 )
 from utils.cortex_utils import (
     call_cortex_complete,
     build_analysis_prompt,
+    build_rag_prompt,
     stream_cortex_response,
 )
 from utils.snowflake_utils import get_session, execute_query
 
 
-def generate_sample_price_data(ticker: str, days: int = 365) -> pd.DataFrame:
-    """Generate sample price data for demonstration."""
-    import numpy as np
-    
-    dates = pd.date_range(end=datetime.now(), periods=days, freq='D')
-    
-    # Random walk with drift
-    np.random.seed(hash(ticker) % 2**32)
-    initial_price = random.uniform(50, 500)
-    returns = np.random.normal(0.0005, 0.02, days)
-    prices = initial_price * np.cumprod(1 + returns)
-    
-    # Add some volume
-    volume = np.random.randint(100000, 5000000, days)
-    
-    return pd.DataFrame({
-        'date': dates,
-        'close': prices,
-        'volume': volume,
-        'high': prices * (1 + np.abs(np.random.normal(0, 0.01, days))),
-        'low': prices * (1 - np.abs(np.random.normal(0, 0.01, days))),
-        'open': np.roll(prices, 1),
-    })
-
-
-def generate_sample_fundamentals(ticker: str) -> dict:
-    """Generate sample fundamental data for demonstration."""
-    random.seed(hash(ticker))
-    
-    return {
-        "market_cap": random.uniform(10e9, 500e9),
-        "pe_ratio": random.uniform(8, 35),
-        "pb_ratio": random.uniform(0.5, 5),
-        "dividend_yield": random.uniform(0, 0.08),
-        "roe": random.uniform(0.05, 0.35),
-        "roa": random.uniform(0.02, 0.15),
-        "debt_to_equity": random.uniform(0, 2),
-        "current_ratio": random.uniform(0.8, 3),
-        "revenue_growth": random.uniform(-0.1, 0.3),
-        "earnings_growth": random.uniform(-0.2, 0.4),
-        "gross_margin": random.uniform(0.15, 0.6),
-        "operating_margin": random.uniform(0.05, 0.3),
-        "net_margin": random.uniform(0.02, 0.2),
-        "beta": random.uniform(0.5, 1.8),
-        "52w_high": random.uniform(100, 600),
-        "52w_low": random.uniform(50, 300),
-    }
-
-
-def render_price_chart(price_df: pd.DataFrame, ticker: str):
-    """Render interactive price chart."""
-    fig = go.Figure()
-    
-    # Candlestick chart
-    fig.add_trace(go.Candlestick(
-        x=price_df['date'],
-        open=price_df['open'],
-        high=price_df['high'],
-        low=price_df['low'],
-        close=price_df['close'],
-        name='Price',
-    ))
-    
-    # Add moving averages
-    price_df['ma_20'] = price_df['close'].rolling(window=20).mean()
-    price_df['ma_50'] = price_df['close'].rolling(window=50).mean()
-    
-    fig.add_trace(go.Scatter(
-        x=price_df['date'],
-        y=price_df['ma_20'],
-        name='20-day MA',
-        line=dict(color='orange', width=1),
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=price_df['date'],
-        y=price_df['ma_50'],
-        name='50-day MA',
-        line=dict(color='blue', width=1),
-    ))
-    
-    fig.update_layout(
-        title=f"{ticker} Price Chart",
-        yaxis_title="Price (ZAR)",
-        xaxis_title="Date",
-        xaxis_rangeslider_visible=False,
-        height=400,
-        margin=dict(t=40, l=0, r=0, b=0),
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_volume_chart(price_df: pd.DataFrame):
-    """Render volume chart."""
-    fig = px.bar(
-        price_df.tail(90),
-        x='date',
-        y='volume',
-        title='Trading Volume (90 days)',
-    )
-    fig.update_layout(
-        height=200,
-        margin=dict(t=40, l=0, r=0, b=0),
-        showlegend=False,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_fundamental_metrics(fundamentals: dict, ticker: str):
-    """Render fundamental metrics cards."""
-    st.subheader(":material/analytics: Fundamental Metrics")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        with st.container(border=True):
-            st.metric("Market Cap", format_currency(fundamentals["market_cap"]))
-            st.metric("P/E Ratio", f"{fundamentals['pe_ratio']:.1f}x")
-            st.metric("P/B Ratio", f"{fundamentals['pb_ratio']:.1f}x")
-    
-    with col2:
-        with st.container(border=True):
-            st.metric("Dividend Yield", format_percentage(fundamentals["dividend_yield"]))
-            st.metric("ROE", format_percentage(fundamentals["roe"]))
-            st.metric("ROA", format_percentage(fundamentals["roa"]))
-    
-    with col3:
-        with st.container(border=True):
-            st.metric("D/E Ratio", f"{fundamentals['debt_to_equity']:.2f}")
-            st.metric("Current Ratio", f"{fundamentals['current_ratio']:.2f}")
-            st.metric("Beta", f"{fundamentals['beta']:.2f}")
-    
-    with col4:
-        with st.container(border=True):
-            st.metric("Revenue Growth", format_percentage(fundamentals["revenue_growth"]))
-            st.metric("Earnings Growth", format_percentage(fundamentals["earnings_growth"]))
-            st.metric("Net Margin", format_percentage(fundamentals["net_margin"]))
-
-
-def render_margin_analysis(fundamentals: dict):
-    """Render margin analysis chart."""
-    margins = pd.DataFrame({
-        'Metric': ['Gross Margin', 'Operating Margin', 'Net Margin'],
-        'Value': [
-            fundamentals['gross_margin'] * 100,
-            fundamentals['operating_margin'] * 100,
-            fundamentals['net_margin'] * 100,
-        ]
-    })
-    
-    fig = px.bar(
-        margins,
-        x='Metric',
-        y='Value',
-        title='Margin Analysis (%)',
-        color='Metric',
-        color_discrete_sequence=['#1f77b4', '#ff7f0e', '#2ca02c'],
-    )
-    fig.update_layout(
-        height=300,
-        margin=dict(t=40, l=0, r=0, b=0),
-        showlegend=False,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_ai_analysis(ticker: str, company_name: str, fundamentals: dict, price_df: pd.DataFrame):
-    """Render AI-powered analysis section."""
-    st.subheader(":material/psychology: AI Analysis")
-    
-    analysis_type = st.selectbox(
-        "Analysis Type",
-        ["Fundamental Overview", "Technical Analysis", "Risk Assessment", "Custom Question"],
-        key="analysis_type_select"
-    )
-    
-    if analysis_type == "Custom Question":
-        custom_question = st.text_input(
-            "Your question about this company:",
-            placeholder=f"What are the key risks for {ticker}?",
-            key="custom_question_input"
-        )
-    else:
-        custom_question = None
-    
-    if st.button(":material/auto_awesome: Generate Analysis", type="primary", use_container_width=True):
-        # Build context from available data
-        context = f"""
-Company: {company_name} ({ticker})
-Sector: {next((t['sector'] for t in SAMPLE_JSE_TICKERS if t['ticker'] == ticker), 'Unknown')}
-
-FUNDAMENTAL DATA:
-- Market Cap: {format_currency(fundamentals['market_cap'])}
-- P/E Ratio: {fundamentals['pe_ratio']:.1f}x
-- P/B Ratio: {fundamentals['pb_ratio']:.1f}x
-- Dividend Yield: {format_percentage(fundamentals['dividend_yield'])}
-- ROE: {format_percentage(fundamentals['roe'])}
-- ROA: {format_percentage(fundamentals['roa'])}
-- Debt/Equity: {fundamentals['debt_to_equity']:.2f}
-- Current Ratio: {fundamentals['current_ratio']:.2f}
-- Revenue Growth: {format_percentage(fundamentals['revenue_growth'])}
-- Earnings Growth: {format_percentage(fundamentals['earnings_growth'])}
-- Gross Margin: {format_percentage(fundamentals['gross_margin'])}
-- Operating Margin: {format_percentage(fundamentals['operating_margin'])}
-- Net Margin: {format_percentage(fundamentals['net_margin'])}
-- Beta: {fundamentals['beta']:.2f}
-
-PRICE DATA:
-- Current Price: R{price_df['close'].iloc[-1]:.2f}
-- 52-Week High: R{fundamentals['52w_high']:.2f}
-- 52-Week Low: R{fundamentals['52w_low']:.2f}
-- 20-day MA: R{price_df['close'].rolling(20).mean().iloc[-1]:.2f}
-- 50-day MA: R{price_df['close'].rolling(50).mean().iloc[-1]:.2f}
-- YTD Return: {((price_df['close'].iloc[-1] / price_df['close'].iloc[0]) - 1) * 100:.1f}%
-"""
-        
-        # Determine question based on analysis type
-        if analysis_type == "Fundamental Overview":
-            question = f"Provide a comprehensive fundamental analysis of {company_name}. Assess valuation, profitability, financial health, and growth prospects. What should investors focus on?"
-            analysis_mode = "fundamental"
-        elif analysis_type == "Technical Analysis":
-            question = f"Analyze the technical setup for {ticker}. Discuss price trends, moving averages, support/resistance levels, and potential scenarios."
-            analysis_mode = "technical"
-        elif analysis_type == "Risk Assessment":
-            question = f"Identify and analyze the key risks for {company_name}. Consider financial, operational, market, and sector-specific risks."
-            analysis_mode = "general"
-        else:
-            question = custom_question or f"Provide an overview of {company_name}"
-            analysis_mode = "general"
-        
-        prompt = build_analysis_prompt(context, question, analysis_mode)
-        
-        with st.chat_message("assistant"):
-            with st.spinner("Analyzing..."):
-                response = st.write_stream(stream_cortex_response(
-                    prompt, 
-                    model=st.session_state.cortex_model
-                ))
-
-
-def render_related_documents(ticker: str):
-    """Render related documents section."""
-    st.subheader(":material/description: Related Documents")
-    
-    # Check for uploaded documents related to this ticker
-    related_docs = [
+def get_company_documents(ticker: str) -> list:
+    """Get all documents associated with a company."""
+    return [
         doc for doc in st.session_state.uploaded_documents
-        if ticker.lower() in doc.get("name", "").lower() or
-           ticker.lower() in doc.get("content", "").lower()[:500]
+        if doc.get("ticker") == ticker
     ]
+
+
+def render_company_header(company: dict):
+    """Render company header with basic info."""
+    col1, col2 = st.columns([3, 1])
     
-    if related_docs:
-        for doc in related_docs:
-            with st.expander(f":material/description: {doc['name']}"):
-                st.caption(f"Uploaded: {doc.get('uploaded_at', 'Unknown')}")
-                st.caption(f"Type: {doc.get('type', 'Unknown')}")
-                if st.button(f"Analyze", key=f"analyze_doc_{doc['name']}"):
-                    st.session_state.chat_context = {
-                        "type": "document",
-                        "ticker": ticker,
-                        "document": doc,
-                    }
-                    st.switch_page("pages/ai_analyst.py")
-    else:
-        st.info(f"No documents found for {ticker}. Upload annual reports, filings, or research in Data Ingestion.")
-        if st.button(":material/upload: Go to Data Ingestion"):
-            st.switch_page("pages/data_ingestion.py")
-
-
-# Main page rendering
-st.title(":material/analytics: Company Research")
-st.caption("Deep-dive analysis for JSE-listed equities")
-
-# Ticker selection
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    ticker_options = {f"{t['ticker']} - {t['name']}": t['ticker'] for t in SAMPLE_JSE_TICKERS}
-    selected_display = st.selectbox(
-        "Select Company",
-        options=list(ticker_options.keys()),
-        key="research_ticker_select"
-    )
-    selected_ticker = ticker_options[selected_display]
-
-with col2:
-    if st.button(":material/add: Add to Watchlist", use_container_width=True):
-        if selected_ticker not in st.session_state.watchlist:
-            st.session_state.watchlist.append(selected_ticker)
-            st.success(f"Added {selected_ticker} to watchlist")
-        else:
-            st.info(f"{selected_ticker} already in watchlist")
-
-# Store selected ticker
-st.session_state.selected_ticker = selected_ticker
-
-# Get company info
-company_info = next((t for t in SAMPLE_JSE_TICKERS if t['ticker'] == selected_ticker), None)
-
-if company_info:
-    st.header(f"{company_info['name']} ({selected_ticker})")
-    st.caption(f"Sector: {company_info['sector']}")
-    
-    # Generate sample data
-    price_df = generate_sample_price_data(selected_ticker)
-    fundamentals = generate_sample_fundamentals(selected_ticker)
-    
-    # Quick stats
-    current_price = price_df['close'].iloc[-1]
-    prev_price = price_df['close'].iloc[-2]
-    daily_change = (current_price / prev_price - 1) * 100
-    
-    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Current Price", f"R{current_price:.2f}", f"{daily_change:+.2f}%")
+        st.header(f"{company['name']} ({company['ticker']})")
+        st.caption(f":material/category: {company['sector']}")
+        
+        if company.get("description"):
+            st.write(company["description"])
+    
     with col2:
-        st.metric("52W High", f"R{fundamentals['52w_high']:.2f}")
-    with col3:
-        st.metric("52W Low", f"R{fundamentals['52w_low']:.2f}")
-    with col4:
-        st.metric("Market Cap", format_currency(fundamentals['market_cap']))
-    
-    # Tabs for different analyses
-    tab1, tab2, tab3, tab4 = st.tabs([
-        ":material/show_chart: Price",
-        ":material/assessment: Fundamentals",
-        ":material/psychology: AI Analysis",
-        ":material/description: Documents"
-    ])
-    
-    with tab1:
-        render_price_chart(price_df, selected_ticker)
-        render_volume_chart(price_df)
-    
-    with tab2:
-        render_fundamental_metrics(fundamentals, selected_ticker)
-        st.divider()
-        col1, col2 = st.columns(2)
-        with col1:
-            render_margin_analysis(fundamentals)
-        with col2:
-            # Growth metrics chart
-            growth_data = pd.DataFrame({
-                'Metric': ['Revenue Growth', 'Earnings Growth'],
-                'Value': [
-                    fundamentals['revenue_growth'] * 100,
-                    fundamentals['earnings_growth'] * 100,
-                ]
-            })
-            fig = px.bar(
-                growth_data,
-                x='Metric',
-                y='Value',
-                title='Growth Metrics (%)',
-                color='Metric',
-                color_discrete_sequence=['#17becf', '#9467bd'],
-            )
-            fig.update_layout(height=300, margin=dict(t=40, l=0, r=0, b=0), showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-    
-    with tab3:
-        render_ai_analysis(selected_ticker, company_info['name'], fundamentals, price_df)
-    
-    with tab4:
-        render_related_documents(selected_ticker)
+        docs = get_company_documents(company["ticker"])
+        st.metric("Documents", len(docs))
+        
+        if company["ticker"] in st.session_state.watchlist:
+            if st.button(":material/visibility_off: Unwatch", use_container_width=True):
+                st.session_state.watchlist.remove(company["ticker"])
+                st.rerun()
+        else:
+            if st.button(":material/visibility: Watch", use_container_width=True):
+                st.session_state.watchlist.append(company["ticker"])
+                st.rerun()
 
-# Sidebar with quick actions
-with st.sidebar:
-    st.header(":material/compare_arrows: Compare")
-    compare_ticker = st.selectbox(
-        "Compare with",
-        options=[t['ticker'] for t in SAMPLE_JSE_TICKERS if t['ticker'] != selected_ticker],
-        key="compare_ticker_select"
-    )
+
+def render_documents_section(company: dict):
+    """Render documents section for a company."""
+    st.subheader(":material/description: Documents")
     
-    if st.button(":material/compare: Compare", use_container_width=True):
-        st.info("Comparison feature coming soon!")
+    docs = get_company_documents(company["ticker"])
+    
+    if not docs:
+        st.info(
+            f"No documents ingested for {company['ticker']} yet. "
+            "Upload annual reports, SENS announcements, research notes, or other company data."
+        )
+        
+        if st.button(":material/upload_file: Go to Data Ingestion", type="primary"):
+            st.session_state.selected_ticker = company["ticker"]
+            st.switch_page("pages/data_ingestion.py")
+        return
+    
+    # Document type breakdown
+    doc_types = {}
+    for doc in docs:
+        dtype = doc.get("type", "Other")
+        doc_types[dtype] = doc_types.get(dtype, 0) + 1
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.caption("**Document Types**")
+        for dtype, count in doc_types.items():
+            st.write(f"• {dtype}: {count}")
+    
+    with col2:
+        if len(doc_types) > 1:
+            fig = px.pie(
+                pd.DataFrame([{"type": k, "count": v} for k, v in doc_types.items()]),
+                values="count",
+                names="type",
+                hole=0.5,
+            )
+            fig.update_layout(
+                margin=dict(t=0, l=0, r=0, b=0),
+                height=150,
+                showlegend=True,
+                legend=dict(orientation="h"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
     
     st.divider()
     
-    st.header(":material/history: Recent Research")
-    st.caption("Your recently viewed companies will appear here.")
+    # Document list
+    for doc in docs:
+        with st.expander(f":material/description: {doc['name']}", expanded=False):
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.caption(f"Type: {doc.get('type', 'Unknown')}")
+                st.caption(f"Uploaded: {doc.get('uploaded_at', 'Unknown')}")
+                
+                if doc.get("summary"):
+                    st.write("**Summary:**")
+                    st.write(doc["summary"])
+            
+            with col2:
+                if st.button(":material/psychology: Analyze", key=f"analyze_{doc['name']}"):
+                    st.session_state.chat_context = {
+                        "type": "document",
+                        "ticker": company["ticker"],
+                        "company_name": company["name"],
+                        "document": doc,
+                    }
+                    st.switch_page("pages/ai_analyst.py")
+            
+            # Show preview if available
+            content = doc.get("content", "")
+            if content:
+                st.text_area(
+                    "Preview",
+                    value=content[:1000] + "..." if len(content) > 1000 else content,
+                    height=150,
+                    disabled=True,
+                    key=f"preview_{doc['name']}",
+                )
+
+
+def render_ai_research(company: dict):
+    """Render AI-powered research section."""
+    st.subheader(":material/psychology: AI Research Assistant")
+    
+    docs = get_company_documents(company["ticker"])
+    
+    if not docs:
+        st.warning(
+            "No documents available for RAG. Upload company documents first "
+            "to enable AI-powered research."
+        )
+        return
+    
+    # Research mode selection
+    research_mode = st.radio(
+        "Research Mode",
+        ["Ask a Question", "Generate Summary", "Extract Key Data"],
+        horizontal=True,
+        key="research_mode",
+    )
+    
+    if research_mode == "Ask a Question":
+        question = st.text_input(
+            "Your question",
+            placeholder=f"What are the key risks mentioned in {company['name']}'s reports?",
+            key="research_question",
+        )
+        
+        if st.button(":material/send: Ask", type="primary", disabled=not question):
+            # Build context from documents
+            context_parts = []
+            for doc in docs[:5]:  # Limit to 5 docs
+                content = doc.get("content", "")[:3000]  # Limit content
+                context_parts.append(f"[{doc['name']}]\n{content}")
+            
+            context = "\n\n---\n\n".join(context_parts)
+            
+            prompt = build_rag_prompt(
+                retrieved_chunks=[{"source": d["name"], "text": d.get("content", "")[:2000]} for d in docs[:5]],
+                question=question,
+                ticker=company["ticker"],
+            )
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Researching..."):
+                    response = st.write_stream(stream_cortex_response(
+                        prompt,
+                        model=st.session_state.cortex_model,
+                    ))
+    
+    elif research_mode == "Generate Summary":
+        summary_type = st.selectbox(
+            "Summary Type",
+            ["Executive Overview", "Financial Highlights", "Risk Factors", "Strategic Outlook"],
+            key="summary_type",
+        )
+        
+        if st.button(":material/auto_awesome: Generate", type="primary"):
+            # Build context
+            all_content = "\n\n".join([d.get("content", "")[:2000] for d in docs[:5]])
+            
+            prompts = {
+                "Executive Overview": f"Based on the following documents for {company['name']}, provide a concise executive overview covering the company's business, recent performance, and outlook.",
+                "Financial Highlights": f"Extract and summarize the key financial metrics and highlights from these {company['name']} documents. Focus on revenue, profitability, growth rates, and financial health indicators.",
+                "Risk Factors": f"Identify and summarize the main risk factors mentioned in these {company['name']} documents. Categorize them by type (operational, financial, market, regulatory, etc.).",
+                "Strategic Outlook": f"Based on these documents, summarize {company['name']}'s strategic direction, initiatives, and management's outlook for the future.",
+            }
+            
+            prompt = build_analysis_prompt(
+                context=all_content,
+                question=prompts[summary_type],
+                analysis_type="fundamental",
+            )
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing documents..."):
+                    response = st.write_stream(stream_cortex_response(
+                        prompt,
+                        model=st.session_state.cortex_model,
+                    ))
+    
+    else:  # Extract Key Data
+        data_type = st.selectbox(
+            "Data to Extract",
+            ["Financial Metrics", "Key Personnel", "Important Dates", "Entities & Relationships"],
+            key="extract_type",
+        )
+        
+        if st.button(":material/table_chart: Extract", type="primary"):
+            all_content = "\n\n".join([d.get("content", "")[:2000] for d in docs[:5]])
+            
+            extract_prompts = {
+                "Financial Metrics": "Extract all financial metrics, ratios, and numbers from these documents. Format as a structured list with metric name, value, and period/context.",
+                "Key Personnel": "Extract all names and roles of key personnel (executives, board members, auditors) mentioned in these documents.",
+                "Important Dates": "Extract all significant dates mentioned (reporting dates, AGM dates, dividend dates, deadlines, etc.) from these documents.",
+                "Entities & Relationships": "Extract all company names, subsidiaries, partners, and competitors mentioned, along with their relationship to the main company.",
+            }
+            
+            prompt = f"""Analyze the following documents for {company['name']} and {extract_prompts[data_type]}
+
+DOCUMENTS:
+{all_content}
+
+Provide structured, well-organized output."""
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Extracting data..."):
+                    response = st.write_stream(stream_cortex_response(
+                        prompt,
+                        model=st.session_state.cortex_model,
+                    ))
+
+
+def render_notes_section(company: dict):
+    """Render research notes section."""
+    st.subheader(":material/edit_note: Research Notes")
+    
+    # Initialize notes storage
+    if "company_notes" not in st.session_state:
+        st.session_state.company_notes = {}
+    
+    ticker = company["ticker"]
+    current_notes = st.session_state.company_notes.get(ticker, "")
+    
+    notes = st.text_area(
+        "Your notes",
+        value=current_notes,
+        height=200,
+        placeholder=f"Add your research notes for {company['name']}...",
+        key=f"notes_{ticker}",
+    )
+    
+    if st.button(":material/save: Save Notes"):
+        st.session_state.company_notes[ticker] = notes
+        st.success("Notes saved!")
+
+
+def render_no_company_selected():
+    """Render view when no company is selected."""
+    st.info("Select a company to research or add companies from the Dashboard.")
+    
+    companies = st.session_state.get("companies", [])
+    
+    if companies:
+        st.subheader("Your Companies")
+        
+        cols = st.columns(3)
+        for idx, company in enumerate(companies):
+            with cols[idx % 3]:
+                with st.container(border=True):
+                    st.markdown(f"**{company['ticker']}**")
+                    st.caption(company['name'])
+                    st.caption(f":material/category: {company['sector']}")
+                    
+                    if st.button(":material/science: Research", key=f"select_{company['ticker']}", use_container_width=True):
+                        st.session_state.selected_ticker = company['ticker']
+                        st.rerun()
+    else:
+        if st.button(":material/add_business: Add Your First Company", type="primary"):
+            st.switch_page("pages/dashboard.py")
+
+
+# Main page rendering
+st.title(":material/science: Company Research")
+st.caption("Deep-dive analysis and document exploration")
+
+# Initialize state
+if "companies" not in st.session_state:
+    st.session_state.companies = []
+
+companies = st.session_state.companies
+
+# Company selector
+if companies:
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        ticker_options = {f"{c['ticker']} - {c['name']}": c['ticker'] for c in companies}
+        
+        # Pre-select if coming from another page
+        default_idx = 0
+        if st.session_state.get("selected_ticker"):
+            for idx, (display, ticker) in enumerate(ticker_options.items()):
+                if ticker == st.session_state.selected_ticker:
+                    default_idx = idx
+                    break
+        
+        selected_display = st.selectbox(
+            "Select Company",
+            options=list(ticker_options.keys()),
+            index=default_idx,
+            key="research_company_select",
+        )
+        selected_ticker = ticker_options[selected_display]
+        st.session_state.selected_ticker = selected_ticker
+    
+    with col2:
+        if st.button(":material/add_business: Add New", use_container_width=True):
+            st.switch_page("pages/dashboard.py")
+    
+    # Get selected company
+    company = next((c for c in companies if c["ticker"] == selected_ticker), None)
+    
+    if company:
+        render_company_header(company)
+        
+        st.divider()
+        
+        # Research tabs
+        tab1, tab2, tab3 = st.tabs([
+            ":material/description: Documents",
+            ":material/psychology: AI Research",
+            ":material/edit_note: Notes",
+        ])
+        
+        with tab1:
+            render_documents_section(company)
+        
+        with tab2:
+            render_ai_research(company)
+        
+        with tab3:
+            render_notes_section(company)
+
+else:
+    render_no_company_selected()
+
+# Sidebar
+with st.sidebar:
+    st.header(":material/quick_reference: Quick Actions")
+    
+    if st.button(":material/upload_file: Ingest Documents", use_container_width=True):
+        st.switch_page("pages/data_ingestion.py")
+    
+    if st.button(":material/psychology: AI Analyst", use_container_width=True):
+        st.switch_page("pages/ai_analyst.py")
+    
+    st.divider()
+    
+    # Watchlist quick view
+    st.subheader(":material/visibility: Watchlist")
+    watchlist = st.session_state.get("watchlist", [])
+    
+    if watchlist and companies:
+        for ticker in watchlist[:5]:
+            company = next((c for c in companies if c["ticker"] == ticker), None)
+            if company:
+                if st.button(f"{ticker}", key=f"watch_{ticker}", use_container_width=True):
+                    st.session_state.selected_ticker = ticker
+                    st.rerun()
+    else:
+        st.caption("No companies in watchlist")

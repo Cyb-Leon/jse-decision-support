@@ -14,7 +14,6 @@ from utils.data_utils import (
     parse_excel_upload,
     extract_text_from_pdf,
     chunk_text,
-    SAMPLE_JSE_TICKERS,
 )
 from utils.cortex_utils import summarize_document, extract_entities
 from utils.snowflake_utils import (
@@ -30,6 +29,26 @@ def render_document_upload():
     """Render document upload section."""
     st.subheader(":material/upload_file: Document Upload")
     st.caption("Upload PDFs, CSVs, or Excel files for analysis")
+    
+    companies = st.session_state.get("companies", [])
+    
+    # Company selection for document association
+    if companies:
+        company_options = ["None (General)"] + [f"{c['ticker']} - {c['name']}" for c in companies]
+        selected_company_display = st.selectbox(
+            "Associate with company (optional)",
+            options=company_options,
+            key="doc_company_select",
+            help="Link this document to a specific company for focused analysis",
+        )
+        
+        if selected_company_display != "None (General)":
+            selected_ticker = selected_company_display.split(" - ")[0]
+        else:
+            selected_ticker = None
+    else:
+        selected_ticker = None
+        st.info("Add companies in the Dashboard to associate documents with them.")
     
     uploaded_files = st.file_uploader(
         "Choose files",
@@ -47,6 +66,8 @@ def render_document_upload():
                 
                 with col1:
                     st.caption(f"Type: {file_type.upper()} | Size: {uploaded_file.size / 1024:.1f} KB")
+                    if selected_ticker:
+                        st.caption(f":material/link: Associated with: {selected_ticker}")
                 
                 with col2:
                     process_btn = st.button(
@@ -62,6 +83,7 @@ def render_document_upload():
                             "type": file_type,
                             "size": uploaded_file.size,
                             "uploaded_at": datetime.now().isoformat(),
+                            "ticker": selected_ticker,  # Associate with company
                         }
                         
                         # Process based on file type

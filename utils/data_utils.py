@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 
-# JSE Sector Classifications
+# JSE Sector Classifications (user can add custom sectors)
 JSE_SECTORS = [
     "Basic Materials",
     "Consumer Discretionary",
@@ -21,25 +21,7 @@ JSE_SECTORS = [
     "Technology",
     "Telecommunications",
     "Utilities",
-]
-
-# Common JSE tickers for demo/testing
-SAMPLE_JSE_TICKERS = [
-    {"ticker": "NPN", "name": "Naspers Limited", "sector": "Consumer Discretionary"},
-    {"ticker": "SOL", "name": "Sasol Limited", "sector": "Energy"},
-    {"ticker": "SBK", "name": "Standard Bank Group", "sector": "Financials"},
-    {"ticker": "AGL", "name": "Anglo American plc", "sector": "Basic Materials"},
-    {"ticker": "BHP", "name": "BHP Group Limited", "sector": "Basic Materials"},
-    {"ticker": "FSR", "name": "FirstRand Limited", "sector": "Financials"},
-    {"ticker": "MTN", "name": "MTN Group Limited", "sector": "Telecommunications"},
-    {"ticker": "VOD", "name": "Vodacom Group Limited", "sector": "Telecommunications"},
-    {"ticker": "SHP", "name": "Shoprite Holdings", "sector": "Consumer Staples"},
-    {"ticker": "CFR", "name": "Compagnie Financière Richemont", "sector": "Consumer Discretionary"},
-    {"ticker": "ABG", "name": "Absa Group Limited", "sector": "Financials"},
-    {"ticker": "NED", "name": "Nedbank Group Limited", "sector": "Financials"},
-    {"ticker": "SLM", "name": "Sanlam Limited", "sector": "Financials"},
-    {"ticker": "DSY", "name": "Discovery Limited", "sector": "Financials"},
-    {"ticker": "BTI", "name": "British American Tobacco", "sector": "Consumer Staples"},
+    "Other",
 ]
 
 
@@ -277,95 +259,50 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
     return chunks
 
 
-def create_sample_portfolio() -> List[Dict[str, Any]]:
+def get_companies_by_sector(companies: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Create a sample portfolio for demonstration.
+    Group companies by their sector.
+    
+    Args:
+        companies: List of company dictionaries with 'sector' key
     
     Returns:
-        List of portfolio holdings
+        Dictionary mapping sector names to lists of companies
     """
-    import random
-    
-    sample_holdings = []
-    selected_tickers = random.sample(SAMPLE_JSE_TICKERS, 5)
-    
-    for ticker_info in selected_tickers:
-        # Generate random but realistic data
-        shares = random.randint(100, 1000) * 10
-        avg_price = random.uniform(50, 500)
-        current_price = avg_price * random.uniform(0.8, 1.3)
-        
-        sample_holdings.append({
-            "ticker": ticker_info["ticker"],
-            "name": ticker_info["name"],
-            "sector": ticker_info["sector"],
-            "shares": shares,
-            "avg_price": round(avg_price, 2),
-            "current_price": round(current_price, 2),
-            "market_value": round(shares * current_price, 2),
-            "cost_basis": round(shares * avg_price, 2),
-            "unrealized_pnl": round(shares * (current_price - avg_price), 2),
-            "return_pct": round((current_price / avg_price - 1) * 100, 2),
-        })
-    
-    return sample_holdings
+    sectors = {}
+    for company in companies:
+        sector = company.get("sector", "Other")
+        if sector not in sectors:
+            sectors[sector] = []
+        sectors[sector].append(company)
+    return sectors
 
 
-def create_sample_sens_announcements() -> List[Dict[str, Any]]:
+def validate_company_data(ticker: str, name: str, sector: str) -> tuple:
     """
-    Create sample SENS announcements for demonstration.
+    Validate company data before adding.
+    
+    Args:
+        ticker: Company ticker symbol
+        name: Company name
+        sector: Company sector
     
     Returns:
-        List of SENS announcement records
+        Tuple of (is_valid, error_message)
     """
-    from datetime import datetime, timedelta
+    if not ticker or not ticker.strip():
+        return False, "Ticker symbol is required"
     
-    announcements = [
-        {
-            "date": datetime.now() - timedelta(hours=2),
-            "ticker": "NPN",
-            "company": "Naspers Limited",
-            "category": "Trading Statement",
-            "headline": "Trading Statement for the six months ended 30 September 2025",
-            "summary": "Headline earnings per share expected to increase by 15-20%",
-            "sentiment": "positive",
-        },
-        {
-            "date": datetime.now() - timedelta(hours=5),
-            "ticker": "SBK",
-            "company": "Standard Bank Group",
-            "category": "Dividend Declaration",
-            "headline": "Declaration of Final Dividend",
-            "summary": "Final dividend of 620 cents per share declared",
-            "sentiment": "positive",
-        },
-        {
-            "date": datetime.now() - timedelta(days=1),
-            "ticker": "SOL",
-            "company": "Sasol Limited",
-            "category": "Operational Update",
-            "headline": "Production Update - Secunda Operations",
-            "summary": "Planned maintenance shutdown completed ahead of schedule",
-            "sentiment": "neutral",
-        },
-        {
-            "date": datetime.now() - timedelta(days=1, hours=8),
-            "ticker": "MTN",
-            "company": "MTN Group Limited",
-            "category": "Acquisition",
-            "headline": "Acquisition of Fintech Startup",
-            "summary": "MTN acquires mobile payments company for $150 million",
-            "sentiment": "positive",
-        },
-        {
-            "date": datetime.now() - timedelta(days=2),
-            "ticker": "AGL",
-            "company": "Anglo American plc",
-            "category": "Production Report",
-            "headline": "Q3 2025 Production Report",
-            "summary": "Copper production up 8%, platinum group metals down 3%",
-            "sentiment": "neutral",
-        },
-    ]
+    if not validate_ticker(ticker):
+        return False, "Invalid ticker format (should be 2-5 letters)"
     
-    return announcements
+    if not name or not name.strip():
+        return False, "Company name is required"
+    
+    if len(name.strip()) < 2:
+        return False, "Company name too short"
+    
+    if not sector:
+        return False, "Sector is required"
+    
+    return True, ""

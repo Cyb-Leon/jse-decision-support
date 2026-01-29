@@ -8,9 +8,9 @@ import streamlit as st
 # Page configuration is managed by Snowflake
 
 # Initialize all session state BEFORE navigation
-# Data & Portfolio State
+# Company & Data State
+st.session_state.setdefault("companies", [])  # User-added companies with sectors
 st.session_state.setdefault("watchlist", [])
-st.session_state.setdefault("portfolio", {})
 st.session_state.setdefault("selected_ticker", None)
 
 # Document & Ingestion State
