@@ -88,6 +88,39 @@ def execute_query(query: str, params: list = None):
         return None
 
 
+def _find_column(df, target_name: str):
+    """
+    Find a column by name, handling various formats (quoted, unquoted, case variations).
+    
+    Args:
+        df: DataFrame to search
+        target_name: Target column name to find
+    
+    Returns:
+        Actual column name in DataFrame, or None if not found
+    """
+    # Direct match
+    if target_name in df.columns:
+        return target_name
+    
+    # Try uppercase
+    if target_name.upper() in df.columns:
+        return target_name.upper()
+    
+    # Try lowercase
+    if target_name.lower() in df.columns:
+        return target_name.lower()
+    
+    # Handle quoted column names (e.g., '"name"' -> 'name')
+    for col in df.columns:
+        # Strip quotes and compare
+        clean_col = col.strip('"').strip("'").lower()
+        if clean_col == target_name.lower():
+            return col
+    
+    return None
+
+
 def get_available_databases():
     """
     Get list of available databases in Snowflake.
@@ -97,9 +130,7 @@ def get_available_databases():
     """
     df = execute_query("SHOW DATABASES")
     if df is not None and not df.empty:
-        # Find the name column (case-insensitive)
-        cols_lower = {c.lower(): c for c in df.columns}
-        col_name = cols_lower.get("name")
+        col_name = _find_column(df, "name")
         if col_name is None:
             st.error(f"Could not find 'name' column. Available columns: {list(df.columns)}")
             return []
@@ -119,7 +150,9 @@ def get_available_schemas(database: str):
     """
     df = execute_query(f"SHOW SCHEMAS IN DATABASE {database}")
     if df is not None and not df.empty:
-        col_name = "name" if "name" in df.columns else "NAME"
+        col_name = _find_column(df, "name")
+        if col_name is None:
+            return []
         return df[col_name].tolist()
     return []
 
@@ -137,7 +170,9 @@ def get_available_tables(database: str, schema: str):
     """
     df = execute_query(f"SHOW TABLES IN {database}.{schema}")
     if df is not None and not df.empty:
-        col_name = "name" if "name" in df.columns else "NAME"
+        col_name = _find_column(df, "name")
+        if col_name is None:
+            return []
         return df[col_name].tolist()
     return []
 
