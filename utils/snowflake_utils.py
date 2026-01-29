@@ -96,8 +96,14 @@ def get_available_databases():
         List of database names
     """
     df = execute_query("SHOW DATABASES")
-    if df is not None:
-        return df["name"].tolist()
+    if df is not None and not df.empty:
+        # Find the name column (case-insensitive)
+        cols_lower = {c.lower(): c for c in df.columns}
+        col_name = cols_lower.get("name")
+        if col_name is None:
+            st.error(f"Could not find 'name' column. Available columns: {list(df.columns)}")
+            return []
+        return df[col_name].tolist()
     return []
 
 
@@ -112,8 +118,9 @@ def get_available_schemas(database: str):
         List of schema names
     """
     df = execute_query(f"SHOW SCHEMAS IN DATABASE {database}")
-    if df is not None:
-        return df["name"].tolist()
+    if df is not None and not df.empty:
+        col_name = "name" if "name" in df.columns else "NAME"
+        return df[col_name].tolist()
     return []
 
 
@@ -129,8 +136,9 @@ def get_available_tables(database: str, schema: str):
         List of table names
     """
     df = execute_query(f"SHOW TABLES IN {database}.{schema}")
-    if df is not None:
-        return df["name"].tolist()
+    if df is not None and not df.empty:
+        col_name = "name" if "name" in df.columns else "NAME"
+        return df[col_name].tolist()
     return []
 
 
